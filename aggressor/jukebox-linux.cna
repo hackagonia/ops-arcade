@@ -1,0 +1,45 @@
+#
+# Jukebox - Beacon Alert Sound (Linux)
+#
+# Plays a .wav when a new beacon checks in for the first time.
+# No external dependencies — uses Java AudioSystem (runs in-process).
+#
+# Place alert.wav next to this .cna script.
+#
+
+import java.io.File;
+import javax.sound.sampled.*;
+
+global('$jukebox_sound');
+$jukebox_sound = script_resource("alert.wav");
+
+sub jukebox_play {
+    $sound_path = $1;
+
+    fork({
+        $f = [new java.io.File: $sound_path];
+        if (![$f exists]) {
+            warn("[Jukebox] File not found: $sound_path");
+            return;
+        }
+
+        try {
+            $stream = [javax.sound.sampled.AudioSystem getAudioInputStream: $f];
+            $clip   = [javax.sound.sampled.AudioSystem getClip];
+            [$clip open: $stream];
+            [$clip start];
+            while ([$clip isRunning]) {
+                sleep(100);
+            }
+            [$clip close];
+            [$stream close];
+        }
+        catch $error {
+            warn("[Jukebox] Playback failed: $error");
+        }
+    }, \$sound_path);
+}
+
+on beacon_initial {
+    jukebox_play($jukebox_sound);
+}

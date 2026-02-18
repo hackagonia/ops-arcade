@@ -1,0 +1,12 @@
+# loader.cna
+
+
+
+include("./AutoSA/AutoSA.cna");
+include("./Sitrep/Sitrep.cna");
+
+
+
+
+#include("/path/to/script3.cna");
+

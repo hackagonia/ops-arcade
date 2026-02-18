@@ -1,0 +1,525 @@
+# ============================================
+# Script Name:    CobaltStrike Daily SITREP Generator
+# Version:        2.0
+# Author:         James White
+# Contact:        
+# GitHub:         https://github.com/yourhandle
+# 
+# Created:        2026-02-12
+# Last Modified:  2026-02-12
+# ============================================
+# 
+# Description:
+#   Generates end-of-day situational reports for 
+#   red team engagements. Tracks beacons, credentials,
+#   downloads, keylogging, screenshots, and command
+#   activity throughout the day.
+#
+# Features:
+#   - Active beacon summary with elevation status
+#   - Domains and hosts reached
+#   - Lost beacon tracking
+#   - Credential aggregation
+#   - File download logging
+#   - Command activity per host
+#
+# Usage:
+#   Menu:    Reporting -> SITREP Tools -> Generate SITREP
+#   Console: sitrep
+#
+# Installation:
+#   1. Load script via Cobalt Strike -> Script Manager
+#   2. Or add to .cna autoload directory
+#
+# Configuration:
+#   $sitrep_dir - Set output directory for saved reports
+#
+# Dependencies:
+#   None
+#
+# Changelog:
+#   v2.0 - Added domain tracking, lost beacons, grouped hosts
+#   v1.0 - Initial release
+#
+# License:
+#   MIT License / Internal Use Only / etc.
+#
+# Disclaimer:
+#   For authorized security testing only. Ensure proper
+#   authorization before use in any engagement.
+#
+# ============================================
+
+
+
+
+# ============================================
+# Daily SITREP Generator
+# ============================================
+
+global('@new_beacons @credentials @downloads @keystrokes @screenshots @commands_log @lost_beacons');
+@new_beacons = @();
+@credentials = @();
+@downloads = @();
+@keystrokes = @();
+@screenshots = @();
+@commands_log = @();
+@lost_beacons = @();
+
+# ============================================
+# Event Listeners
+# ============================================
+
+on beacon_initial {
+    local('$bid $info $is_elevated');
+    $bid = $1;
+    $info = beacon_info($bid);
+    
+    # Fix elevated check - check for * suffix or is_admin flag
+    $is_elevated = "No";
+    if ($info["is_admin"] == 1) {
+        $is_elevated = "Yes";
+    }
+    # Also check if user ends with * (admin indicator)
+    if ("*" isin $info["user"]) {
+        $is_elevated = "Yes";
+    }
+    
+    push(@new_beacons, %(
+        time => tstamp(ticks()),
+        bid => $bid,
+        user => $info["user"],
+        computer => $info["computer"],
+        ip => $info["internal"],
+        pid => $info["pid"],
+        process => $info["process"],
+        arch => $info["arch"],
+        elevated => $is_elevated
+    ));
+}
+
+# Track lost beacons
+on beacon_exit {
+    local('$bid $info');
+    $bid = $1;
+    $info = beacon_info($bid);
+    
+    push(@lost_beacons, %(
+        time => tstamp(ticks()),
+        bid => $bid,
+        user => $info["user"],
+        computer => $info["computer"],
+        ip => $info["internal"],
+        reason => "exit"
+    ));
+}
+
+on beacon_output_credentials {
+    local('$bid $creds');
+    $bid = $1;
+    $creds = $2;
+    
+    foreach $entry (split("\n", $creds)) {
+        if (strlen($entry) > 0) {
+            push(@credentials, %(
+                time => tstamp(ticks()),
+                bid => $bid,
+                host => beacon_info($bid, "computer"),
+                credential => $entry
+            ));
+        }
+    }
+}
+
+on beacon_download_complete {
+    local('$bid $download $path $size');
+    $bid = $1;
+    $download = $2;
+    $path = $download["path"];
+    $size = $download["size"];
+    
+    push(@downloads, %(
+        time => tstamp(ticks()),
+        bid => $bid,
+        host => beacon_info($bid, "computer"),
+        path => $path,
+        size => $size
+    ));
+}
+
+on beacon_output_keystrokes {
+    local('$bid $keydata');
+    $bid = $1;
+    $keydata = $2;
+    
+    push(@keystrokes, %(
+        time => tstamp(ticks()),
+        bid => $bid,
+        host => beacon_info($bid, "computer"),
+        data_length => strlen($keydata)
+    ));
+}
+
+on screenshot {
+    local('$bid');
+    $bid = $1;
+    
+    push(@screenshots, %(
+        time => tstamp(ticks()),
+        bid => $bid,
+        host => beacon_info($bid, "computer"),
+        user => beacon_info($bid, "user")
+    ));
+}
+
+on beacon_tasked {
+    local('$bid $task');
+    $bid = $1;
+    $task = $2;
+    
+    push(@commands_log, %(
+        time => tstamp(ticks()),
+        bid => $bid,
+        host => beacon_info($bid, "computer"),
+        task => $task
+    ));
+}
+
+# ============================================
+# SITREP Generation
+# ============================================
+
+sub generate_sitrep {
+    local('$report $active_beacons');
+    
+    $report = "";
+    $report .= "=" x 60 . "\n";
+    $report .= "  DAILY SITREP - " . tstamp(ticks()) . "\n";
+    $report .= "=" x 60 . "\n\n";
+    
+    $active_beacons = beacons();
+    
+    # --- Beacon Summary ---
+    $report .= "[BEACON SUMMARY]\n";
+    $report .= "-" x 40 . "\n";
+    
+    local('$elevated_count $user_count');
+    $elevated_count = 0;
+    $user_count = 0;
+    
+    foreach $b ($active_beacons) {
+        if ($b["is_admin"] == 1 || "*" isin $b["user"]) {
+            $elevated_count++;
+        } else {
+            $user_count++;
+        }
+    }
+    
+    $report .= "Total Active: " . size($active_beacons) . "\n";
+    $report .= "  - Elevated (Admin/SYSTEM): $elevated_count\n";
+    $report .= "  - User-level: $user_count\n";
+    $report .= "Hosts Lost Today: " . size(@lost_beacons) . "\n\n";
+    
+    # --- Domains Reached ---
+    $report .= "[DOMAINS REACHED]\n";
+    $report .= "-" x 40 . "\n";
+    
+    local('%domains');
+    foreach $b ($active_beacons) {
+        local('$computer $domain');
+        $computer = $b["computer"];
+        
+        # Extract domain from computer name or use beacon's domain info
+        if ($b["note"] ne "" && "." isin $b["note"]) {
+            $domain = $b["note"];
+        } else if ("\\" isin $b["user"]) {
+            # Extract domain from DOMAIN\user format
+            $domain = split("\\\\", $b["user"])[0];
+        } else {
+            $domain = "WORKGROUP/Local";
+        }
+        
+        if ($domain !in keys(%domains)) {
+            %domains[$domain] = @();
+        }
+        push(%domains[$domain], $computer);
+    }
+    
+    $report .= "Total Domains: " . size(%domains) . "\n";
+    foreach $domain (keys(%domains)) {
+        local('@unique_hosts');
+        @unique_hosts = unique(%domains[$domain]);
+        $report .= "  - $domain (" . size(@unique_hosts) . " hosts)\n";
+    }
+    $report .= "\n";
+    
+    # --- Unique Hosts ---
+    $report .= "[HOSTS COMPROMISED]\n";
+    $report .= "-" x 40 . "\n";
+    
+    local('%hosts');
+    foreach $b ($active_beacons) {
+        %hosts[$b["computer"]] = $b["internal"];
+    }
+    $report .= "Unique Hosts: " . size(%hosts) . "\n";
+    foreach $host (keys(%hosts)) {
+        $report .= "  - $host (" . %hosts[$host] . ")\n";
+    }
+    $report .= "\n";
+    
+# --- Beacons Grouped by Host ---
+    $report .= "[BEACONS BY HOST]\n";
+    $report .= "-" x 40 . "\n";
+    
+    local('%beacons_by_host');
+    foreach $b ($active_beacons) {
+        local('$host');
+        $host = $b["computer"];
+        if ($host !in keys(%beacons_by_host)) {
+            %beacons_by_host[$host] = 0;
+        }
+        %beacons_by_host[$host] = %beacons_by_host[$host] + 1;
+    }
+    
+    foreach $host (keys(%beacons_by_host)) {
+        local('$count');
+        $count = %beacons_by_host[$host];
+        $report .= "  " . $host . " - " . $count . " beacon(s)\n";
+    }
+    $report .= "\n";
+
+    
+    # --- Lost Beacons ---
+    $report .= "[HOSTS LOST TODAY]\n";
+    $report .= "-" x 40 . "\n";
+    if (size(@lost_beacons) > 0) {
+        local('%lost_by_host');
+        foreach $lb (@lost_beacons) {
+            local('$host');
+            $host = $lb["computer"];
+            if ($host !in keys(%lost_by_host)) {
+                %lost_by_host[$host] = 0;
+            }
+            %lost_by_host[$host] = %lost_by_host[$host] + 1;
+        }
+        
+        foreach $host (keys(%lost_by_host)) {
+            $report .= "  $host - " . %lost_by_host[$host] . " beacon(s) lost\n";
+        }
+        
+        $report .= "\n  Details:\n";
+        foreach $lb (@lost_beacons) {
+            $report .= "    " . $lb["time"] . " | " . $lb["computer"];
+            $report .= " | " . $lb["user"];
+            $report .= " | " . $lb["ip"] . "\n";
+        }
+    } else {
+        $report .= "  No beacons lost today.\n";
+    }
+    $report .= "\n";
+    
+    # --- New Callbacks Today ---
+    $report .= "[NEW CALLBACKS TODAY]\n";
+    $report .= "-" x 40 . "\n";
+    if (size(@new_beacons) > 0) {
+        foreach $nb (@new_beacons) {
+            $report .= "  " . $nb["time"] . " | " . $nb["computer"];
+            $report .= " | " . $nb["user"];
+            $report .= " | " . $nb["ip"];
+            $report .= " | Elevated: " . $nb["elevated"] . "\n";
+        }
+    } else {
+        $report .= "  No new callbacks today.\n";
+    }
+    $report .= "\n";
+    
+    # --- Credentials Obtained ---
+    $report .= "[CREDENTIALS OBTAINED]\n";
+    $report .= "-" x 40 . "\n";
+    if (size(@credentials) > 0) {
+        local('%unique_creds');
+        foreach $c (@credentials) {
+            %unique_creds[$c["credential"]] = $c["host"];
+        }
+        $report .= "Total Unique: " . size(%unique_creds) . "\n";
+        foreach $cred (keys(%unique_creds)) {
+            $report .= "  [" . %unique_creds[$cred] . "] $cred\n";
+        }
+    } else {
+        $report .= "  No new credentials captured.\n";
+    }
+    $report .= "\n";
+    
+    # --- Files Downloaded ---
+    $report .= "[FILES DOWNLOADED]\n";
+    $report .= "-" x 40 . "\n";
+    if (size(@downloads) > 0) {
+        foreach $d (@downloads) {
+            $report .= "  " . $d["time"] . " | " . $d["host"];
+            $report .= " | " . $d["path"];
+            $report .= " | " . format_size($d["size"]) . "\n";
+        }
+    } else {
+        $report .= "  No files downloaded today.\n";
+    }
+    $report .= "\n";
+    
+    # --- Keylogging Activity ---
+    $report .= "[KEYLOGGING ACTIVITY]\n";
+    $report .= "-" x 40 . "\n";
+    if (size(@keystrokes) > 0) {
+        local('%keystroke_hosts');
+        foreach $k (@keystrokes) {
+            %keystroke_hosts[$k["host"]] = %keystroke_hosts[$k["host"]] + 1;
+        }
+        foreach $host (keys(%keystroke_hosts)) {
+            $report .= "  $host - " . %keystroke_hosts[$host] . " capture events\n";
+        }
+    } else {
+        $report .= "  No keylogging data captured.\n";
+    }
+    $report .= "\n";
+    
+    # --- Screenshots ---
+    $report .= "[SCREENSHOTS CAPTURED]\n";
+    $report .= "-" x 40 . "\n";
+    if (size(@screenshots) > 0) {
+        local('%screenshot_hosts');
+        foreach $s (@screenshots) {
+            %screenshot_hosts[$s["host"]] = %screenshot_hosts[$s["host"]] + 1;
+        }
+        foreach $host (keys(%screenshot_hosts)) {
+            $report .= "  $host - " . %screenshot_hosts[$host] . " screenshots\n";
+        }
+    } else {
+        $report .= "  No screenshots captured.\n";
+    }
+    $report .= "\n";
+    
+    # --- Command Activity Summary ---
+    $report .= "[COMMAND ACTIVITY]\n";
+    $report .= "-" x 40 . "\n";
+    $report .= "Total Commands Executed: " . size(@commands_log) . "\n";
+    
+    local('%cmd_per_host');
+    foreach $cmd (@commands_log) {
+        %cmd_per_host[$cmd["host"]] = %cmd_per_host[$cmd["host"]] + 1;
+    }
+    foreach $host (keys(%cmd_per_host)) {
+        $report .= "  $host - " . %cmd_per_host[$host] . " commands\n";
+    }
+    $report .= "\n";
+    
+    # --- Objectives ---
+    $report .= "[OBJECTIVES STATUS]\n";
+    $report .= "-" x 40 . "\n";
+    $report .= "  [ ] Initial Access\n";
+    $report .= "  [ ] Privilege Escalation\n";
+    $report .= "  [ ] Lateral Movement\n";
+    $report .= "  [ ] Domain Admin\n";
+    $report .= "  [ ] Data Exfiltration\n";
+    $report .= "  (Update manually as needed)\n\n";
+    
+    $report .= "=" x 60 . "\n";
+    $report .= "  END SITREP\n";
+    $report .= "=" x 60 . "\n";
+    
+    return $report;
+}
+
+# Helper to get unique values from array
+sub unique {
+    local('@arr %seen @result');
+    @arr = $1;
+    foreach $item (@arr) {
+        if ($item !in keys(%seen)) {
+            %seen[$item] = 1;
+            push(@result, $item);
+        }
+    }
+    return @result;
+}
+
+sub format_size {
+    local('$bytes');
+    $bytes = $1;
+    
+    if ($bytes > 1048576) {
+        return round($bytes / 1048576.0, 2) . " MB";
+    } else if ($bytes > 1024) {
+        return round($bytes / 1024.0, 2) . " KB";
+    } else {
+        return "$bytes bytes";
+    }
+}
+
+# ============================================
+# Menu and Commands
+# ============================================
+
+popup reporting {
+    menu "SITREP Tools" {
+        item "Generate SITREP" {
+            local('$report $dialog');
+            $report = generate_sitrep();
+            
+            $dialog = dialog("Daily SITREP", %(report => $report), &sitrep_dialog_callback);
+            dialog_description($dialog, "End-of-day situational report");
+            drow_text_area($dialog, "report", 30, 80);
+            dbutton_action($dialog, "Save to File");
+            dbutton_action($dialog, "Copy to Clipboard");
+            dbutton_action($dialog, "Close");
+            dialog_show($dialog);
+        }
+        
+        item "Reset Daily Counters" {
+            @new_beacons = @();
+            @credentials = @();
+            @downloads = @();
+            @keystrokes = @();
+            @screenshots = @();
+            @commands_log = @();
+            @lost_beacons = @();
+            show_message("Daily counters have been reset.");
+        }
+        
+        item "Quick Stats" {
+            local('$stats $active');
+            $active = beacons();
+            $stats = "Quick Stats:\n";
+            $stats .= "Active Beacons: " . size($active) . "\n";
+            $stats .= "New Today: " . size(@new_beacons) . "\n";
+            $stats .= "Lost Today: " . size(@lost_beacons) . "\n";
+            $stats .= "Creds Captured: " . size(@credentials) . "\n";
+            $stats .= "Files Downloaded: " . size(@downloads) . "\n";
+            $stats .= "Commands Run: " . size(@commands_log);
+            show_message($stats);
+        }
+    }
+}
+
+sub sitrep_dialog_callback {
+    local('$dialog $button $values');
+    $dialog = $1;
+    $button = $2;
+    $values = $3;
+    
+    if ($button eq "Save to File") {
+        local('$filename $handle');
+        $filename = "sitrep_" . formatDate("yyyyMMdd_HHmmss") . ".txt";
+        $handle = openf("> $filename");
+        writeb($handle, $values["report"]);
+        closef($handle);
+        show_message("SITREP saved to $filename");
+    }
+    else if ($button eq "Copy to Clipboard") {
+        clipboard($values["report"]);
+        show_message("SITREP copied to clipboard");
+    }
+}
+
+alias sitrep {
+    local('$report');
+    $report = generate_sitrep();
+    blog($1, "\n" . $report);
+}

