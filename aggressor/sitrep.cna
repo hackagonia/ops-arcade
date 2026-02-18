@@ -1,7 +1,7 @@
 # ============================================
 # Script Name:    CobaltStrike Daily SITREP Generator
 # Version:        2.0
-# Author:         James White
+# Author:         
 # Contact:        
 # GitHub:         https://github.com/yourhandle
 # 
@@ -522,4 +522,5 @@ alias sitrep {
     local('$report');
     $report = generate_sitrep();
     blog($1, "\n" . $report);
+
 }
